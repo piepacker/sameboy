@@ -20,7 +20,7 @@ jobs:
       - run: make -C libretro -j 4 && strip -s libretro/sameboy_libretro.so
 
       - name: ZIP Release
-        uses: papeloto/action-zip@v1
+        uses: vimtor/action-zip@v1
         with:
           files: libretro/sameboy_libretro.so
           dest: sameboy_libretro.so.zip
