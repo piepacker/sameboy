@@ -556,6 +556,8 @@ static void init_for_current_model(unsigned id)
         environ_cb(RETRO_ENVIRONMENT_SET_INPUT_DESCRIPTORS, descriptors_2p);
     }
 
+    // Enable cheat code
+    GB_set_cheats_enabled(&gameboy[i], true);
 }
 
 static void check_variables()
@@ -1405,12 +1407,17 @@ size_t retro_get_memory_size(unsigned type)
 }
 
 void retro_cheat_reset(void)
-{}
+{
+    for (int i = 0; i < emulated_devices; i++) {
+        GB_remove_all_cheats(&gameboy[i]);
+    }
+}
 
 void retro_cheat_set(unsigned index, bool enabled, const char *code)
 {
     (void)index;
-    (void)enabled;
-    (void)code;
-}
 
+    for (int i = 0; i < emulated_devices; i++) {
+        GB_import_cheat_libretro(&gameboy[i], code, enabled);
+    }
+}

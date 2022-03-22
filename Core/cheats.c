@@ -90,6 +90,14 @@ const GB_cheat_t *const *GB_get_cheats(GB_gameboy_t *gb, size_t *size)
     *size = gb->cheat_count;
     return (void *)gb->cheats;
 }
+
+void GB_remove_all_cheats(GB_gameboy_t *gb)
+{
+    while(gb->cheat_count && gb->cheats) {
+        GB_remove_cheat(gb, gb->cheats[0]);
+    }
+}
+
 void GB_remove_cheat(GB_gameboy_t *gb, const GB_cheat_t *cheat)
 {
     for (unsigned i = 0; i < gb->cheat_count; i++) {
@@ -124,63 +132,136 @@ void GB_remove_cheat(GB_gameboy_t *gb, const GB_cheat_t *cheat)
     free((void *)cheat);
 }
 
-bool GB_import_cheat(GB_gameboy_t *gb, const char *cheat, const char *description, bool enabled)
+static bool parse_cheat(const char *cheat, uint16_t* address, uint16_t *bank, uint8_t *value, uint8_t *old_value, bool *use_old_value)
 {
     uint8_t dummy;
     /* GameShark */
-    {
-        uint8_t bank;
-        uint8_t value;
-        uint16_t address;
-        if (sscanf(cheat, "%02hhx%02hhx%04hx%c", &bank, &value, &address, &dummy) == 3) {
-            if (bank >= 0x80) {
-                bank &= 0xF;
-            }
-            GB_add_cheat(gb, description, address, bank, value, 0, false, enabled);
-            return true;
+    if (sscanf(cheat, "%02hx%02hhx%04hx%c", bank, value, address, &dummy) == 3) {
+        if (*bank >= 0x80) {
+            *bank &= 0xF;
         }
+        // No check on previous value
+        *old_value = 0;
+        *use_old_value = false;
+
+        return true;
     }
-    
+
     /* GameGenie */
-    {
-        char stripped_cheat[10] = {0,};
-        for (unsigned i = 0; i < 9 && *cheat; i++) {
-            stripped_cheat[i] = *(cheat++);
-            while (*cheat == '-') {
-                cheat++;
-            }
-        }
-        
-        // Delete the 7th character;
-        stripped_cheat[7] = stripped_cheat[8];
-        stripped_cheat[8] = 0;
-        
-        uint8_t old_value;
-        uint8_t value;
-        uint16_t address;
-        if (sscanf(stripped_cheat, "%02hhx%04hx%02hhx%c", &value, &address, &old_value, &dummy) == 3) {
-            address = (uint16_t)(address >> 4) | (uint16_t)(address << 12);
-            address ^= 0xF000;
-            if (address > 0x7FFF) {
-                return false;
-            }
-            old_value = (uint8_t)(old_value >> 2) | (uint8_t)(old_value << 6);
-            old_value ^= 0xBA;
-            GB_add_cheat(gb, description, address, GB_CHEAT_ANY_BANK, value, old_value, true, enabled);
-            return true;
-        }
-        
-        if (sscanf(stripped_cheat, "%02hhx%04hx%c", &value, &address, &dummy) == 2) {
-            address = (uint16_t)(address >> 4) | (uint16_t)(address << 12);
-            address ^= 0xF000;
-            if (address > 0x7FFF) {
-                return false;
-            }
-            GB_add_cheat(gb, description, address, GB_CHEAT_ANY_BANK, value, false, true, enabled);
-            return true;
+    char stripped_cheat[10] = {0,};
+    for (unsigned i = 0; i < 9 && *cheat; i++) {
+        stripped_cheat[i] = *(cheat++);
+        while (*cheat == '-') {
+            cheat++;
         }
     }
+
+    // Delete the 7th character;
+    stripped_cheat[7] = stripped_cheat[8];
+    stripped_cheat[8] = 0;
+
+    if (sscanf(stripped_cheat, "%02hhx%04hx%02hhx%c", value, address, old_value, &dummy) == 3) {
+        *address = (uint16_t)(*address >> 4) | (uint16_t)(*address << 12);
+        *address ^= 0xF000;
+        if (*address > 0x7FFF) {
+            return false;
+        }
+        *old_value = (uint8_t)(*old_value >> 2) | (uint8_t)(*old_value << 6);
+        *old_value ^= 0xBA;
+        *use_old_value = true;
+        // No bank for genie
+        *bank = GB_CHEAT_ANY_BANK;
+
+        return true;
+    }
+
+    if (sscanf(stripped_cheat, "%02hhx%04hx%c", value, address, &dummy) == 2) {
+        *address = (uint16_t)(*address >> 4) | (uint16_t)(*address << 12);
+        *address ^= 0xF000;
+        if (*address > 0x7FFF) {
+            return false;
+        }
+        // No check on previous value
+        *old_value = 0;
+        *use_old_value = false;
+        // No bank for genie
+        *bank = GB_CHEAT_ANY_BANK;
+
+        return true;
+    }
+
     return false;
+}
+
+bool GB_import_cheat(GB_gameboy_t *gb, const char *cheat, const char *description, bool enabled)
+{
+    uint16_t address = 0;
+    uint16_t bank = 0;
+    uint8_t value = 0;
+    uint8_t old_value = 0;
+    bool use_old_value = false;
+
+    if (!parse_cheat(cheat, &address, &bank, &value, &old_value, &use_old_value)) {
+        return false;
+    }
+
+    GB_add_cheat(gb, description, address, bank, value, old_value, use_old_value, enabled);
+    return true;
+}
+
+static GB_cheat_t *lookup_cheat(GB_gameboy_t *gb, const GB_cheat_t * const c) {
+    const GB_cheat_hash_t *hash = gb->cheat_hash[hash_addr(c->address)];
+    if (!hash)
+        return NULL;
+
+    for (unsigned i = 0; i < hash->size; i++) {
+        GB_cheat_t *cheat = hash->cheats[i];
+        if (cheat->address == c->address && cheat->bank == c->bank && cheat->value == c->value &&
+                cheat->old_value == c->old_value && cheat->use_old_value == c->use_old_value) {
+            return cheat;
+        }
+    }
+
+    return NULL;
+}
+
+bool GB_import_cheat_libretro(GB_gameboy_t *gb, const char *cheat, bool enabled)
+{
+    uint16_t address = 0;
+    uint16_t bank = 0;
+    uint8_t value = 0;
+    uint8_t old_value = 0;
+    bool use_old_value = false;
+
+    if (!parse_cheat(cheat, &address, &bank, &value, &old_value, &use_old_value)) {
+        return false;
+    }
+
+    if (enabled) {
+        GB_add_cheat(gb, "", address, bank, value, old_value, use_old_value, true);
+        return true;
+    } else {
+        // Lookup the cheat pointer in the hash structure
+        GB_cheat_t c = {};
+        c.address = address;
+        c.bank = bank;
+        c.value = value;
+        c.old_value = old_value;
+        c.use_old_value = use_old_value;
+
+        bool status = false;
+        while (1) {
+            GB_cheat_t *cheat = lookup_cheat(gb, &c);
+            if (cheat == NULL) {
+                break;
+            }
+            GB_remove_cheat(gb, cheat);
+            status |= true;
+        };
+        return status;
+    }
+
+    return true;
 }
 
 void GB_update_cheat(GB_gameboy_t *gb, const GB_cheat_t *_cheat, const char *description, uint16_t address, uint16_t bank, uint8_t value, uint8_t old_value, bool use_old_value, bool enabled)

@@ -9,6 +9,7 @@ SOURCES_C   := $(CORE_DIR)/Core/gb.c \
                $(CORE_DIR)/Core/mbc.c \
                $(CORE_DIR)/Core/timing.c \
                $(CORE_DIR)/Core/display.c \
+               $(CORE_DIR)/Core/cheats.c \
                $(CORE_DIR)/Core/symbol_hash.c \
                $(CORE_DIR)/Core/camera.c \
                $(CORE_DIR)/Core/sm83_cpu.c \
@@ -23,7 +24,7 @@ SOURCES_C   := $(CORE_DIR)/Core/gb.c \
                $(CORE_DIR)/libretro/sgb2_boot.c \
                $(CORE_DIR)/libretro/libretro.c
 
-CFLAGS += -DGB_DISABLE_TIMEKEEPING -DGB_DISABLE_REWIND -DGB_DISABLE_DEBUGGER -DGB_DISABLE_CHEATS
+CFLAGS += -DGB_DISABLE_TIMEKEEPING -DGB_DISABLE_REWIND -DGB_DISABLE_DEBUGGER
 
 
 SOURCES_CXX :=	
