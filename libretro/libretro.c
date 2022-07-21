@@ -22,6 +22,7 @@
 
 #include <Core/gb.h>
 #include "libretro.h"
+#include "hcdebug.h"
 
 #ifdef _WIN32
 static const char slash = '\\';
@@ -32,7 +33,6 @@ static const char slash = '/';
 #define MAX_VIDEO_WIDTH 256
 #define MAX_VIDEO_HEIGHT 224
 #define MAX_VIDEO_PIXELS (MAX_VIDEO_WIDTH * MAX_VIDEO_HEIGHT)
-
 
 #define RETRO_MEMORY_GAMEBOY_1_SRAM ((1 << 8) | RETRO_MEMORY_SAVE_RAM)
 #define RETRO_MEMORY_GAMEBOY_1_RTC ((2 << 8) | RETRO_MEMORY_RTC)
@@ -107,6 +107,9 @@ GB_gameboy_t gameboy[2];
 extern const unsigned char dmg_boot[], cgb_boot[], agb_boot[], sgb_boot[], sgb2_boot[];
 extern const unsigned dmg_boot_length, cgb_boot_length, agb_boot_length, sgb_boot_length, sgb2_boot_length;
 bool vblank1_occurred = false, vblank2_occurred = false;
+
+static GB_gameboy_t *_gb = NULL;
+static void hc_init(GB_gameboy_t* gb);
 
 static void fallback_log(enum retro_log_level level, const char *fmt, ...)
 {
@@ -965,12 +968,25 @@ void retro_get_system_av_info(struct retro_system_av_info *info)
     info->timing   = timing;
 }
 
+static void hc_set_debugger(hc_DebuggerIf* const);
+
+static retro_proc_address_t get_proc_address(const char* sym)
+{
+    if (!strcmp(sym, "hc_set_debuggger") || !strcmp(sym, "hc_set_debugger"))
+    {
+        return (retro_proc_address_t)hc_set_debugger;
+    }
+    
+    return NULL;
+}
 
 void retro_set_environment(retro_environment_t cb)
 {
     environ_cb = cb;
 
     cb(RETRO_ENVIRONMENT_SET_SUBSYSTEM_INFO,  (void*)subsystems);
+    static struct retro_get_proc_address_interface get_proc = { get_proc_address };
+    cb(RETRO_ENVIRONMENT_SET_PROC_ADDRESS_CALLBACK,  (void*)&get_proc);
 }
 
 void retro_set_audio_sample(retro_audio_sample_t cb)
@@ -1132,6 +1148,8 @@ bool retro_load_game(const struct retro_game_info *info)
     check_variables();
 
     retro_set_memory_maps();
+    
+    hc_init(&gameboy[0]);
 
     return true;
 }
@@ -1263,7 +1281,6 @@ bool retro_unserialize(const void *data, size_t size)
     }
 
     return true;
-
 }
 
 void *retro_get_memory_data(unsigned type)
@@ -1371,7 +1388,7 @@ size_t retro_get_memory_size(unsigned type)
         }
     }
     else { 
-        switch (type) { 
+        switch (type) {
             case RETRO_MEMORY_GAMEBOY_1_SRAM:
                 if (gameboy[0].cartridge_type->has_battery && gameboy[0].mbc_ram_size != 0) {
                     size = gameboy[0].mbc_ram_size;
@@ -1420,4 +1437,263 @@ void retro_cheat_set(unsigned index, bool enabled, const char *code)
     for (int i = 0; i < emulated_devices; i++) {
         GB_import_cheat_libretro(&gameboy[i], code, enabled);
     }
+}
+
+/** Hackable Console **/
+
+void* frontend_ud;
+void (*handle_event)(void* ud, hc_SubscriptionID id, hc_Event const* event);
+
+typedef struct Subscription {
+    int enabled;
+    hc_EventType type;
+    void* desc;
+} Subscription;
+
+#define N_SUBSCRIPTIONS 128
+static Subscription subscriptions[N_SUBSCRIPTIONS];
+
+static hc_SubscriptionID add_subscription(hc_EventType type)
+{
+    for (hc_SubscriptionID i = 0; i < N_SUBSCRIPTIONS; ++i)
+    {
+        if (!subscriptions[i].enabled)
+        {
+            subscriptions[i].enabled = 1;
+            subscriptions[i].type = type;
+            return i;
+        }
+    }
+    
+    return -1;
+}
+
+static void remove_subscription(hc_SubscriptionID id)
+{
+    subscriptions[id].enabled = 0;
+}
+
+static hc_GenericBreakpoint ldbb_breakpoint = {
+    .v1 = {
+        .description = "ldbb"
+    }
+};
+
+static hc_SubscriptionID subscribe(hc_Subscription const* requested)
+{
+    hc_SubscriptionID id = add_subscription(requested->type);
+    Subscription* subscription = &subscriptions[id];
+    switch (requested->type)
+    {
+    case HC_EVENT_GENERIC:
+        if (requested->generic.breakpoint == &ldbb_breakpoint)
+        {
+            // FIXME: this is never disabled in this implementation, even if unsubscribed.
+            _gb->has_software_breakpoints = 1;
+            subscription->desc = &ldbb_breakpoint;
+            return id;
+        }
+        break;
+    default:
+        break;
+    }
+    
+    remove_subscription(id);
+    return -1;
+}
+
+static void unsubscribe(hc_SubscriptionID id)
+{
+    remove_subscription(id);
+}
+
+static uint8_t main_mem_peek(uint64_t address)
+{
+    return GB_read_memory(_gb, address);
+}
+
+static int main_mem_poke(uint64_t address, uint8_t value)
+{
+    uint8_t prev = GB_read_memory(_gb, address); // TODO: make this side-effect-less
+    GB_write_memory(_gb, address, value);
+    uint8_t next = GB_read_memory(_gb, address); // TODO: this too
+    return next != prev;
+}
+
+static uint8_t rom_peek(uint64_t address)
+{
+    return _gb->rom[address];
+}
+
+static int rom_poke(uint64_t address, uint8_t value)
+{
+    _gb->rom[address] = value;
+    return 1;
+}
+
+/* called on any execution of opcode 0x40, assuming gb->has_software_breakpoints */
+static void ldbb_breakpoint_callback(GB_gameboy_t *gb)
+{
+    hc_Event ev = {
+        .type = HC_EVENT_GENERIC,
+        .generic = {
+            .breakpoint = &ldbb_breakpoint
+        }
+    };
+    for (hc_SubscriptionID i = 0; i < N_SUBSCRIPTIONS; ++i)
+    {
+        Subscription* s = &subscriptions[i];
+        if (s->enabled && s->type == HC_EVENT_GENERIC && s->desc == &ldbb_breakpoint)
+        {
+            handle_event(frontend_ud, i, &ev);
+        }
+    }
+}
+
+static uint64_t cpu_get_register(unsigned reg)
+{
+    switch(reg)
+    {
+    case HC_Z80_A:
+        return _gb->a;
+    case HC_Z80_F:
+        return _gb->f;
+    case HC_Z80_BC:
+        return _gb->bc;
+    case HC_Z80_DE:
+        return _gb->de;
+    case HC_Z80_HL:
+        return _gb->hl;
+    case HC_Z80_I:
+        return 0;
+    case HC_Z80_R:
+        return 0;
+    case HC_Z80_SP:
+        return _gb->sp;
+    case HC_Z80_PC:
+        return _gb->pc;
+    case HC_Z80_IFF:
+        return 0;
+    case HC_Z80_IM:
+        return _gb->ime;
+    case HC_Z80_WZ:
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static int cpu_set_register(unsigned reg, uint64_t value)
+{
+    switch(reg)
+    {
+    case HC_Z80_A:
+        _gb->a = value; return 1;
+    case HC_Z80_F:
+        _gb->f = value; return 1;
+    case HC_Z80_BC:
+        _gb->bc = value; return 1;
+    case HC_Z80_DE:
+        _gb->de = value; return 1;
+    case HC_Z80_HL:
+        _gb->hl = value; return 1;
+    case HC_Z80_I:
+        return 0;
+    case HC_Z80_R:
+        return 0;
+    case HC_Z80_SP:
+        _gb->sp = value; return 1;
+    case HC_Z80_PC:
+        _gb->pc = value; return 1;
+    case HC_Z80_IFF:
+        return 0;
+    case HC_Z80_IM:
+        _gb->ime = value; return 1;
+    case HC_Z80_WZ:
+        return 0;
+    default:
+        return 0;
+    }
+}
+
+static hc_Memory main_mem = {
+    .v1 = {
+        .id = "ram",
+        .description = "cpu memory",
+        .alignment = 1,
+        .base_address = 0,
+        .size = 0x10000,
+        
+        .break_points = NULL,
+        .num_break_points = 0,
+        .peek = main_mem_peek,
+        .poke = main_mem_poke
+    }
+};
+
+static hc_Memory rom = {
+    .v1 = {
+        .id = "rom",
+        .description = "read-only memory",
+        .alignment = 1,
+        .base_address = 0,
+        .size = 0x2000,
+        .break_points = NULL,
+        .num_break_points = 0,
+        .peek = rom_peek,
+        .poke = rom_poke
+    }
+};
+
+static hc_GenericBreakpoint const* const cpu_breakpoints[] = {
+    &ldbb_breakpoint
+};
+
+static hc_Cpu main_cpu = {
+    .v1 = {
+        .id = "LR35902",
+        .description = "main cpu",
+        .type = HC_CPU_Z80,
+        .is_main = 1,
+        
+        .memory_region = &main_mem,
+        .break_points = cpu_breakpoints,
+        .num_break_points = 1,
+        
+        .set_register = cpu_set_register,
+        .get_register = cpu_get_register
+    }
+};
+
+static hc_Cpu const* const cpus[] = {&main_cpu};
+static hc_Memory const* const mems[] = {&main_mem, &rom};
+
+static hc_System hc_system = {
+    {
+        .description = "sameboy",
+        .cpus = cpus,
+        .num_cpus = 1,
+        .memory_regions = mems,
+        .num_memory_regions = 2,
+        .break_points = NULL,
+        .num_break_points = 0,
+    }
+};
+
+static void hc_init(GB_gameboy_t* gb)
+{
+    _gb = gb;
+    rom.v1.size = _gb->rom_size;
+    _gb->software_breakpoint_callback = ldbb_breakpoint_callback;
+}
+
+static void hc_set_debugger(hc_DebuggerIf* const dbg)
+{
+    dbg->core_api_version = HC_API_VERSION;
+    dbg->v1.system = &hc_system;
+    dbg->v1.subscribe = subscribe;
+    dbg->v1.unsubscribe = unsubscribe;
+    handle_event = dbg->v1.handle_event;
+    frontend_ud = dbg->v1.user_data;
+    return;
 }

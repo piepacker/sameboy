@@ -322,6 +322,7 @@ typedef void (*GB_icd_pixel_callback_t)(GB_gameboy_t *gb, uint8_t row);
 typedef void (*GB_icd_hreset_callback_t)(GB_gameboy_t *gb);
 typedef void (*GB_icd_vreset_callback_t)(GB_gameboy_t *gb);
 typedef void (*GB_boot_rom_load_callback_t)(GB_gameboy_t *gb, GB_boot_rom_t type);
+typedef void (*GB_software_breakpoint_callback_t)(GB_gameboy_t *gb);
 
 struct GB_breakpoint_s;
 struct GB_watchpoint_s;
@@ -679,6 +680,7 @@ struct GB_gameboy_internal_s {
         GB_read_memory_callback_t read_memory_callback;
         GB_boot_rom_load_callback_t boot_rom_load_callback;
         GB_print_image_callback_t printer_callback;
+        GB_software_breakpoint_callback_t software_breakpoint_callback;
         GB_workboy_set_time_callback workboy_set_time_callback;
         GB_workboy_get_time_callback workboy_get_time_callback;
 
