@@ -111,7 +111,7 @@ WARNINGS += -Wno-nonnull -Wno-unused-result -Wno-strict-aliasing -Wno-multichar 
 
 # Only add this flag if the compiler supports it
 ifeq ($(shell $(CC) -x c -c $(NULL) -o $(NULL) -Werror -Wpartial-availability 2> $(NULL); echo $$?),0)
-WARNINGS += -Wpartial-availability
+#WARNINGS += -Wpartial-availability
 endif
 
 # GCC's implementation of this warning has false positives, so we skip it
